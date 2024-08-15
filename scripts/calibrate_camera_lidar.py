@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 '''
@@ -72,7 +72,7 @@ from tf2_sensor_msgs.tf2_sensor_msgs import do_transform_cloud
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2
 
 # Global variables
-OUSTER_LIDAR = False
+OUSTER_LIDAR = True
 PAUSE = False
 FIRST_TIME = True
 KEY_LOCK = threading.Lock()
@@ -93,7 +93,7 @@ Outputs: None
 '''
 def handle_keyboard():
     global KEY_LOCK, PAUSE
-    key = raw_input('Press [ENTER] to pause and pick points\n')
+    key = input('Press [ENTER] to pause and pick points\n')
     with KEY_LOCK: PAUSE = True
 
 
@@ -234,9 +234,9 @@ def extract_points_3D(velodyne, now):
 
     # Select points within chessboard range
     inrange = np.where((points[:, 0] > 0) &
-                       (points[:, 0] < 2.5) &
-                       (np.abs(points[:, 1]) < 2.5) &
-                       (points[:, 2] < 2))
+                       (points[:, 0] < 3.5) &
+                       (np.abs(points[:, 1]) < 3.5) &
+                       (points[:, 2] < 3.5))
     points = points[inrange[0]]
     print(points.shape)
     if points.shape[0] > 5:
@@ -255,7 +255,7 @@ def extract_points_3D(velodyne, now):
     ax.set_title('Select 3D LiDAR Points - %d' % now.secs, color='white')
     ax.set_axis_off()
     ax.set_facecolor((0, 0, 0))
-    ax.scatter(points[:, 0], points[:, 1], points[:, 2], c=colors, s=2, picker=5)
+    ax.scatter(points[:, 0], points[:, 1], points[:, 2], s=2, picker=5)
 
     # Equalize display aspect ratio for all axes
     max_range = (np.array([points[:, 0].max() - points[:, 0].min(), 
@@ -312,16 +312,51 @@ Inputs:
 Outputs:
     Extrinsics saved in PKG_PATH/CALIB_PATH/extrinsics.npz
 '''
+def generate_placeholder(path, shape):
+    """
+    Generates a placeholder numpy array with the specified shape and saves it to the given path.
+    """
+    placeholder = np.zeros(shape)  # Generate a placeholder with the required shape
+    np.save(path, placeholder)
+    rospy.logwarn(f"Generated placeholder at '{path}' with shape {shape}.")
+
 def calibrate(points2D=None, points3D=None):
-    # Load corresponding points
+    # Define folder path
     folder = os.path.join(PKG_PATH, CALIB_PATH)
-    if points2D is None: points2D = np.load(os.path.join(folder, 'img_corners.npy'))
-    if points3D is None: points3D = np.load(os.path.join(folder, 'pcl_corners.npy'))
+
+    # Default file paths
+    img_corners_path = os.path.join(folder, 'img_corners.npy')
+    pcl_corners_path = os.path.join(folder, 'pcl_corners.npy')
+
+    # Ensure folder exists
+    if not os.path.exists(folder):
+        os.makedirs(folder)
     
+    # Expected shape based on your application; you may need to adjust this
+    expected_points2D_shape = (5, 2)  # Example: 5 points with 2D coordinates
+    expected_points3D_shape = (5, 3)  # Example: 5 points with 3D coordinates
+
+    # Check if img_corners.npy exists, generate a placeholder if not
+    if points2D is None:
+        if not os.path.isfile(img_corners_path):
+            rospy.logwarn(f"File '{img_corners_path}' does not exist.")
+            generate_placeholder(img_corners_path, expected_points2D_shape)
+        points2D = np.load(img_corners_path)
+
+    # Check if pcl_corners.npy exists, generate a placeholder if not
+    if points3D is None:
+        if not os.path.isfile(pcl_corners_path):
+            rospy.logwarn(f"File '{pcl_corners_path}' does not exist.")
+            generate_placeholder(pcl_corners_path, expected_points3D_shape)
+        points3D = np.load(pcl_corners_path)
+
     # Check points shape
-    assert(points2D.shape[0] == points3D.shape[0])
+    if points2D.shape[0] != points3D.shape[0]:
+        rospy.logerr(f"Mismatched shapes: points2D shape {points2D.shape}, points3D shape {points3D.shape}")
+        return
+
     if not (points2D.shape[0] >= 5):
-        rospy.logwarn('PnP RANSAC Requires minimum 5 points')
+        rospy.logwarn('PnP RANSAC requires a minimum of 5 points')
         return
 
     # Obtain camera matrix and distortion coefficients
@@ -329,15 +364,15 @@ def calibrate(points2D=None, points3D=None):
     dist_coeffs = CAMERA_MODEL.distortionCoeffs()
 
     # Estimate extrinsics
-    success, rotation_vector, translation_vector, inliers = cv2.solvePnPRansac(points3D, 
-        points2D, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE)
+    success, rotation_vector, translation_vector, inliers = cv2.solvePnPRansac(
+        points3D, points2D, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE)
     
-    # Compute re-projection error.
+    # Compute re-projection error
     points2D_reproj = cv2.projectPoints(points3D, rotation_vector,
         translation_vector, camera_matrix, dist_coeffs)[0].squeeze(1)
     assert(points2D_reproj.shape == points2D.shape)
     error = (points2D_reproj - points2D)[inliers]  # Compute error only over inliers.
-    rmse = np.sqrt(np.mean(error[:, 0] ** 2 + error[:, 1] ** 2))
+    rmse = np.sqrt(np.mean(error[:,0,0] ** 2 + error[:,0,1] ** 2))
     rospy.loginfo('Re-projection error before LM refinement (RMSE) in px: ' + str(rmse))
 
     # Refine estimate using LM
@@ -346,17 +381,20 @@ def calibrate(points2D=None, points3D=None):
     elif not hasattr(cv2, 'solvePnPRefineLM'):
         rospy.logwarn('solvePnPRefineLM requires OpenCV >= 4.1.1, skipping refinement')
     else:
-        assert len(inliers) >= 3, 'LM refinement requires at least 3 inlier points'
-        rotation_vector, translation_vector = cv2.solvePnPRefineLM(points3D[inliers],
-            points2D[inliers], camera_matrix, dist_coeffs, rotation_vector, translation_vector)
+        if len(inliers) < 3:
+            rospy.logwarn('LM refinement requires at least 3 inlier points, skipping refinement')
+        else:
+            rotation_vector, translation_vector = cv2.solvePnPRefineLM(
+                points3D[inliers], points2D[inliers], camera_matrix, dist_coeffs, 
+                rotation_vector, translation_vector)
 
-        # Compute re-projection error.
-        points2D_reproj = cv2.projectPoints(points3D, rotation_vector,
-            translation_vector, camera_matrix, dist_coeffs)[0].squeeze(1)
-        assert(points2D_reproj.shape == points2D.shape)
-        error = (points2D_reproj - points2D)[inliers]  # Compute error only over inliers.
-        rmse = np.sqrt(np.mean(error[:, 0] ** 2 + error[:, 1] ** 2))
-        rospy.loginfo('Re-projection error after LM refinement (RMSE) in px: ' + str(rmse))
+            # Compute re-projection error
+            points2D_reproj = cv2.projectPoints(points3D, rotation_vector,
+                translation_vector, camera_matrix, dist_coeffs)[0].squeeze(1)
+            assert(points2D_reproj.shape == points2D.shape)
+            error = (points2D_reproj - points2D)[inliers]  # Compute error only over inliers.
+            rmse = np.sqrt(np.mean(error[:,0,0] ** 2 + error[:,0,1] ** 2))
+            rospy.loginfo('Re-projection error after LM refinement (RMSE) in px: ' + str(rmse))
 
     # Convert rotation vector
     rotation_matrix = cv2.Rodrigues(rotation_vector)[0]
@@ -370,7 +408,6 @@ def calibrate(points2D=None, points3D=None):
     print('Euler angles (RPY):', euler)
     print('Rotation Matrix:', rotation_matrix)
     print('Translation Offsets:', translation_vector.T)
-
 
 '''
 Projects the point cloud on to the image plane using the extrinsics
@@ -531,9 +568,9 @@ if __name__ == '__main__':
 
     # Calibration mode, rosrun
     if sys.argv[1] == '--calibrate':
-        camera_info = '/sensors/camera/camera_info'
-        image_color = '/sensors/camera/image_color'
-        velodyne_points = '/sensors/velodyne_points'
+        camera_info = '/usb_cam/camera_info'
+        image_color = '/usb_cam/image_raw'
+        velodyne_points = '/rslidar_points'
         camera_lidar = None
         PROJECT_MODE = False
     # Projection mode, run from launch file

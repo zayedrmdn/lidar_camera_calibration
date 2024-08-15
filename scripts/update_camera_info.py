@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 '''
@@ -38,7 +38,7 @@ def load_calibration_data(filename):
     # Open calibration file
     with open(filename, 'r') as stream:
         try:
-            calibration = yaml.load(stream)
+            calibration = yaml.load(stream, Loader=yaml.SafeLoader)
         except yaml.YAMLError as exc:
             rospy.logerr(exc)
             sys.exit(1)
@@ -58,7 +58,7 @@ if __name__ == '__main__':
     else:
         BAG_FILE = sys.argv[1]
         CALIB_FILE = sys.argv[2]
-        CAMERA_INFO = '/sensors/camera/camera_info'
+        CAMERA_INFO = '/usb_cam/camera_info'
 
     # Load ROSBAG file
     rospy.loginfo('Bag Filename: %s', BAG_FILE)
